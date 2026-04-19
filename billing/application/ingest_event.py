@@ -52,7 +52,7 @@ def ingest_event(command: IngestEventCommand) -> IngestEventResult:
     """Accept a single usage event and persist it.
 
     Dedup + stream append live in ``event_repository``. This function's
-    job is to own the *use case* — translating a command into a result
+    job is to own the use case — translating a command into a result
     the HTTP adapter can render — not the storage mechanics.
     """
     from billing.infrastructure.event_repository import record_event

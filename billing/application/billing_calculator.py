@@ -37,8 +37,11 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 
 from billing.infrastructure.redis import get_redis_client
+
+logger = logging.getLogger(__name__)
 
 
 # Fallback used when a tenant hasn't configured per-customer pricing.
@@ -191,23 +194,27 @@ def calculate_for(
     # boundary — one tenant's ingest pressure cannot pollute another's
     # count.
     stream_key = f"billing:events:{tenant_id}"
+    logger.info(f"Stream key for tenant {tenant_id} is: {stream_key}")
     event_count = client.xlen(stream_key)
-
+    logger.info(f"Event count for tenant {tenant_id} is: {event_count}")
     # Step 2: per-customer pricing, with a fallback so unseeded tenants
     # still produce a usable response for tests and smoke checks.
     pricing_raw = client.hget(f"billing:pricing:{tenant_id}", customer_id)
+    logger.info(f"Pricing raw for tenant {tenant_id} is: {pricing_raw}")
     price_per_event = float(pricing_raw) if pricing_raw else _DEFAULT_PRICE_PER_EVENT
-
+    logger.info(f"Price per event for tenant {tenant_id} is: {price_per_event}")
     # Step 3: compute. Round at the boundary so floating-point noise
     # doesn't reach the client or the persisted draft.
     amount = round(event_count * price_per_event, 4)
-
+    logger.info(f"Amount for tenant {tenant_id} is: {amount}")
     # Step 4: persist the draft. The id is opaque to the caller — they
     # pass it back verbatim to ``/invoices/generate`` later. A short
     # UUID prefix is enough; the tenant namespace makes collisions
     # functionally impossible.
     invoice_id = f"inv_{str(uuid.uuid4().hex[:16])}"
     invoice_key = f"billing:invoice:{tenant_id}:{invoice_id}"
+    logger.info(f"Invoice ID for tenant {tenant_id} is: {invoice_id}")
+    logger.info(f"Invoice key for tenant {tenant_id} is: {invoice_key}")
     client.hset(
         invoice_key,
         mapping={

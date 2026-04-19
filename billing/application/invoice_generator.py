@@ -11,12 +11,14 @@ the concurrency-cap story.
 """
 
 from __future__ import annotations
+import logging
 
 import time
 from dataclasses import dataclass
 
 from billing.infrastructure.redis import get_redis_client
 
+logger = logging.getLogger(__name__)
 
 class InvoiceNotFound(Exception):
     """Raised when the draft referenced by the client no longer exists.
@@ -115,12 +117,13 @@ def generate_for(*, tenant_id: str, invoice_id: str) -> GeneratedInvoice:
     """
     client = get_redis_client()
     key = f"billing:invoice:{tenant_id}:{invoice_id}"
-
+    logger.info(f"Key for tenant {tenant_id} is: {key}")
     # Step 1: read the draft. Doubles as the existence check — HGETALL
     # on a missing key returns an empty dict, which we translate into
     # the domain's "not found" error.
     draft = client.hgetall(key)
     if not draft:
+        logger.info(f"No draft invoice {invoice_id!r} for tenant {tenant_id!r}")
         raise InvoiceNotFound(
             f"No draft invoice {invoice_id!r} for tenant {tenant_id!r}"
         )
@@ -136,11 +139,10 @@ def generate_for(*, tenant_id: str, invoice_id: str) -> GeneratedInvoice:
             "issued_at": str(issued_at),
         },
     )
-
+    logger.info(f"Issued at for tenant {tenant_id} is: {issued_at}")
     # Step 3: refresh the TTL so the issued invoice is still readable
     # to the client in the seconds/minutes after issuance.
     client.expire(key, 3600)
-
     # Value object for the view. ``customer_id`` and ``amount`` come
     # from the draft — those numbers were agreed at calculate time and
     # we don't recompute them on the commit.

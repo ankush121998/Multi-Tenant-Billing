@@ -33,7 +33,9 @@ from billing.interfaces.api.incoming.serializers import (
     UsageEventSerializer,
 )
 from billing.interfaces.api.incoming.tenant import resolve_tenant
+import logging
 
+logger = logging.getLogger(__name__)
 
 class IngestView(APIView):
     """POST /api/v1/events/ingest — accept one usage event for a tenant.
@@ -51,7 +53,7 @@ class IngestView(APIView):
         serializer = UsageEventSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = cast(dict[str, Any], serializer.validated_data)
-
+        logger.info(f"Ingesting event for tenant {tenant_id}: {data}")
         command = IngestEventCommand(
             tenant_id=tenant_id,
             event_name=data["event_name"],
@@ -62,7 +64,7 @@ class IngestView(APIView):
             properties=data.get("properties") or {},
         )
         result = ingest_event(command)
-
+        logger.info(f"Result for tenant {tenant_id} is: {result}")
         return Response(
             {
                 "event_id": result.event_id,
@@ -136,6 +138,7 @@ class BillingCalculateView(APIView):
         serializer = BillingCalculateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = cast(dict[str, Any], serializer.validated_data)
+        logger.info(f"Calculating invoice for tenant {tenant_id}: {data}")
 
         # Step 3: hand off to the application layer. The view never
         # touches Redis directly; ports-and-adapters means "HTTP stays
@@ -146,6 +149,7 @@ class BillingCalculateView(APIView):
             period_start=data["period_start"],
             period_end=data["period_end"],
         )
+        logger.info(f"Result for tenant {tenant_id} is: {result}")
 
         # Step 4: render. The response is intentionally flat — the
         # caller stores ``invoice_id`` and re-sends it to
@@ -227,6 +231,7 @@ class InvoiceGenerateView(APIView):
     def post(self, request: Request, *args: object, **kwargs: object) -> Response:
         # Step 1: tenant identity — same helper the middleware used.
         tenant_id = resolve_tenant(request)
+        logger.info(f"Generating invoice for tenant {tenant_id}")
 
         # Step 2: HTTP-layer validation. Just one field (``invoice_id``)
         # but we run it through the serializer to get uniform error
@@ -234,7 +239,7 @@ class InvoiceGenerateView(APIView):
         serializer = InvoiceGenerateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = cast(dict[str, Any], serializer.validated_data)
-
+        logger.info(f"Data for tenant {tenant_id} is: {data}")
         # Step 3: delegate to the use case. The domain error
         # ``InvoiceNotFound`` is the only branch the view has to care
         # about — everything else is a 200 or an unhandled 500 (which
@@ -244,6 +249,7 @@ class InvoiceGenerateView(APIView):
                 tenant_id=tenant_id,
                 invoice_id=data["invoice_id"],
             )
+            logger.info(f"Result for tenant {tenant_id} is: {result}")
         except InvoiceNotFound:
             return Response(
                 {
