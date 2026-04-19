@@ -28,14 +28,14 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     # Rate-limit admission runs first so a rejected request spends
     # no cycles on body parsing, auth, or view dispatch.
-    "billing.interfaces.api.incoming.middleware.RateLimitMiddleware",
+    "billing.interfaces.api.incoming.middleware.RateLimitMiddleware", # runs for all views
     # Concurrency runs after the rate limiter on purpose: the rate
     # limiter is cheaper (one Lua eval) than acquiring a slot, so a
     # request that would have been rate-limited never consumes a
     # concurrency slot it wouldn't need. Order also matters for
     # release semantics — acquiring last means we release first,
     # keeping the slot-held window as short as possible.
-    "billing.interfaces.api.incoming.middleware.ConcurrencyMiddleware",
+    "billing.interfaces.api.incoming.middleware.ConcurrencyMiddleware", # runs for heavy endpoints only like calculate and generate invoice
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",

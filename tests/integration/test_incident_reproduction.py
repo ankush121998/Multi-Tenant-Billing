@@ -198,21 +198,88 @@ def test_without_concurrency_gate_noisy_tenant_is_unbounded(
 ):
     """Counterfactual: neuter the concurrency gate, see the incident shape.
 
-    We can't strip ``ConcurrencyMiddleware`` via ``override_settings``
-    here because Django's ``WSGIHandler`` caches its middleware chain at
-    app init — and our live server reuses one WSGI app across tests. So
-    instead we patch the underlying semaphore's ``acquire`` to always
-    admit. The middleware still runs; the *gate* is disabled. The result
-    is the pre-fix shape: an unrelated tenant (``globex``) on the
-    generous enterprise tier can drive far more than its cap=20 heavy
-    calls simultaneously, because the system has no mechanism to stop it.
+    Why this test exists (the short version)
+    ----------------------------------------
+    The other tests in this file prove the fix works. This one
+    proves the fix is necessary — by temporarily turning it off
+    inside a live, running server and watching the original incident
+    shape re-emerge. In science-class terms: the headline test is the
+    treatment group; this test is the control group. Without the
+    control, "things look fine with the fix on" doesn't tell you
+    whether the fix is doing anything or whether the system would be
+    fine without it. This test answers that question.
+    
+    Fast reject vs slow failure
+        429 at the middleware is cheap: almost no body parsing, no full calculate path.
+        Admitting everything forces the server to do the work or sit in queues — failures become slow (timeouts, 502s) 
+        and hard to reason about. For APIs, controlled rejection is often healthier than uncontrolled overload.
 
-    We pick ``globex`` rather than ``piedmont`` because piedmont's
-    ``small``-tier bucket (burst=50, cost=10 per calculate) caps
-    throughput via the *rate limiter*, not concurrency — which would mask
-    the story. On the enterprise tier the bucket is roomy enough that
-    concurrency, not rate, is the only thing that could have held it back.
+    We prevent over-admission because serving every concurrent heavy request is not free — it risks starving others, 
+    exhausting shared pools, and melting latency under load. Bounded concurrency + 429 on overflow trades some 200s from 
+    one tenant for predictable behavior for all tenants and the platform.
 
+    What the test actually does, step by step
+    -----------------------------------------
+    1. Disable the concurrency gate in the running service. The
+       concurrency middleware calls ``concurrency_semaphore.acquire()``
+       on every request; that function normally returns "rejected"
+       once a tenant's in-flight count is at its cap. We monkeypatch
+       it to always return "admitted". The middleware code path
+       still runs, but the gate it guards is wide open — effectively
+       the pre-fix system.
+    2. Flood globex with 30 concurrent heavy calculate calls.
+       globex is on the enterprise tier with ``max_concurrency=20``.
+       On a working system, at most 20 of those 30 calls should be
+       in flight at once; the other 10 get 429s from the gate.
+    3. Assert that more than 20 succeed with 200. With the gate
+       neutered, nothing stops all 30 from running concurrently. Seeing
+       admitted_200 > 20 is the fingerprint of the pre-fix behaviour:
+       a single tenant blowing past its concurrency cap because there
+       is no cap being enforced.
+    4. Assert zero concurrency_limit 429s. Belt-and-braces: if
+       any 429 with ``error=concurrency_limit`` slipped through, the
+       monkeypatch didn't actually disable the gate and the test
+       would be lying about what it proves.
+
+    Why the awkward monkeypatch (two setattr calls)?
+    ------------------------------------------------
+    The obvious approach — ``override_settings(MIDDLEWARE=[...])`` to
+    remove ``ConcurrencyMiddleware`` — does NOT work here. Django's
+    ``WSGIHandler`` builds and caches its middleware chain the first
+    time it is asked to handle a request, and our ``live_server``
+    fixture reuses one WSGI app across tests. Changing the setting
+    after that point has no effect on the already-wired chain.
+    So we patch one layer deeper — the ``acquire`` function the
+    middleware calls. The middleware binds ``acquire`` by name at
+    import time (``from ... import acquire``), which means patching
+    only ``concurrency_semaphore.acquire`` leaves the middleware still
+    pointing at the old function. Hence the second ``setattr`` that
+    rebinds the middleware's own local reference. Both patches are
+    needed; neither alone is sufficient.
+
+    Why globex and not piedmont?
+    ----------------------------
+    We want this test to isolate the *concurrency* gate. Piedmont is
+    on the ``small`` tier (burst=50, each calculate costs 10 tokens),
+    so its rate limiter would run out of tokens long before 30
+    concurrent calls landed — and we'd be measuring the rate limiter,
+    not the concurrency gate. Globex is on ``enterprise`` (burst=1000),
+    roomy enough that 30 concurrent calculates won't exhaust the bucket
+    — so concurrency is the only remaining thing that could have held
+    them back. Disable concurrency, and the cap visibly vanishes.
+
+    What this test does NOT do
+    --------------------------
+    It does not reproduce the incident's downstream symptoms (Redis
+    pool exhaustion, latency spikes on quiet tenants). It only shows
+    the first step of the incident chain — one tenant driving
+    unbounded concurrency — which on the real pre-fix system was what
+    fed the pool exhaustion further down the line. Seeing this first
+    step makes the rest of the incident story legible.
+
+    Category: ``[demonstration]`` — this is not a correctness test.
+    It is a teaching test: it artificially breaks the fix to show what
+    the fix is doing.
     """
     print("\n[incident] Scenario: counterfactual — disable the concurrency "
           "gate by monkeypatching the semaphore's acquire() to always admit, "

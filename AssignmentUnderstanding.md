@@ -4,9 +4,36 @@ My Understanding:
             The best fit is some mix of per-tenant limits, fairness, prioritization, backpressure, and admission control. In simple words: stop one tenant’s backfill from consuming all shared Redis connections or worker slots.
     3 - Test should show the bad case: under heavy acme-style backfill, globex/initech/piedmont start timing out or failing. Then the fixed version should show isolation   and recovery.
 
+What the logs actually say (root-cause reasoning)
+    Walking the timeline, not just the error lines:
+
+    03:17:38–43 — acme-corp is pounding /events/ingest at ~1–2 req/s, every request 11–22 ms, 200 OK. Their requests are individually healthy. This matches the context clue: acme migrated 6 weeks ago and is running a historical-events backfill.
+    In parallel, globex runs /billing/calculate: 234 ms → 891 ms → 2103 ms. The same endpoint is monotonically slowing down. Nothing about globex's own workload explains that.
+    03:17:43 — first cross-tenant damage: globex and initech ingests jump to 4.8 s and 5.1 s. Acme's requests in the same second stay at 18 ms.
+    03:17:44 — first 504s (globex ingest 7841 ms, initech billing 9200 ms).
+    03:17:45 — connection pool exhausted on globex billing. This is the confirmation: the shared connection pool (likely DB, possibly Redis client pool) is drained.
+    03:17:46–49 — redis timeout after 5000ms cascades across globex, initech. Then 503 service unavailable. piedmont (200 ev/day, tiny) still gets 200s through this window because its arrival rate is low enough to find a free slot. acme keeps getting 200s — because its requests are cheap and synchronous, it effectively got "first in line" for every resource.
+
+    Root cause: 
+        this is the noisy-neighbor problem on shared infrastructure. Acme's backfill isn't expensive per-request, but its aggregate arrival rate saturates the shared Redis connection pool and ECS worker concurrency. Once pool utilization crosses a threshold, any tenant whose request wants a costly operation (/billing/calculate) queues behind acme's flood, blows past the 5 s Redis client timeout, and the failure cascades laterally to other tenants — including the SLA customer whose cycle closes today, and the prospect whose CFO is the champion.
+
+    Key nuance the logs reveal:
+
+        Acme is not "malicious" or even unusual for their current phase — a backfill is a legitimate workload. The platform is just not isolating them.
+        The damage is not proportional to blame. Acme causes it, globex/initech feel it. That's the textbook noisy-neighbor failure mode and it's what the solution has to invert.
+        The problem is admission, not compute. By the time a request holds a Redis connection for 5 s, it's too late — we should have rejected or deferred it earlier.
 
 The narrowest credible solution would be: 
-    An ingest path, a billing path and Invoice path where all uses Redis, a way to classify traffic by tenant and by workload type, a fairness layer that limits or schedules work per tenant, real Redis-backed state, end-to-end tests that recreate the saturation, and a runbook/README.
+    An ingest path, a billing path and Invoice path where all uses Redis, a way to classify traffic by tenant and by workload type, a fairness layer that limits or schedules work per tenant, real Redis-backed state, end-to-end tests that recreate the saturation.
+
+From that, what needs to be built:
+    1 - Per-tenant admission control on the API (Django middleware), enforced before any Redis / DB / downstream work is done. Token-bucket or sliding-window counter, state in Redis itself (with a Lua script for atomicity and to avoid its own race). Rejects with 429 and a Retry-After header — fail fast, not at the 5 s Redis timeout.
+
+    2 - Tenant tiers / plans, config-driven, so globex (enterprise, SLA) has higher and reserved capacity vs. piedmont (small) vs. acme (currently in migration/backfill). The tier must be loadable at runtime (Redis-backed, not code-deployed) so oncall can lift a tier in an incident without a deploy.
+
+    3 - Endpoint cost weighting. /events/ingest is cheap — 1 token. /billing/calculate and /invoices/generate are heavy — consume more tokens from the same bucket, or have a separate "heavy" bucket. This is what prevents acme's cheap ingest flood from starving globex's heavy billing call.
+    
+    4 - Per-tenant Redis connection / concurrency cap. Rate limits cap arrival; they don't cap simultaneous in-flight cost. A semaphore (Redis-backed counter) per tenant on the shared resource prevents any single tenant from holding more than N of the pool's connections at once — this is the direct fix for "connection pool exhausted."
 
 
 What I would rule out:
