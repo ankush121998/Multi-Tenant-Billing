@@ -90,12 +90,15 @@ become a platform outage.
 
 ```
 billing/
-├── interfaces/api/incoming/       # HTTP adapter
-│   ├── urls.py
-│   ├── views.py                   # IngestView, BillingCalculateView, InvoiceGenerateView
-│   ├── serializers.py             # DRF serializers (one per endpoint)
-│   ├── middleware.py              # RateLimitMiddleware, ConcurrencyMiddleware
-│   └── tenant.py                  # resolve_tenant helper
+├── apps.py                        # Django AppConfig (BillingConfig)
+├── interfaces/
+│   └── api/
+│       └── incoming/              # HTTP adapter
+│           ├── urls.py
+│           ├── views.py           # IngestView, BillingCalculateView, InvoiceGenerateView
+│           ├── serializers.py     # DRF serializers (one per endpoint)
+│           ├── middleware.py      # RateLimitMiddleware, ConcurrencyMiddleware
+│           └── tenant.py          # resolve_tenant helper
 ├── application/                   # use cases — pure business logic
 │   ├── ingest_event.py
 │   ├── rate_limiter.py            # cost table, plan lookup, delegates to bucket

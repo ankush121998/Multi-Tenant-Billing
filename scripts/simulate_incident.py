@@ -6,11 +6,11 @@ What this script does
 Fires two concurrent workloads against a running instance of this
 service:
 
-  (1) **Noisy tenant** — a configurable tenant floods a *heavy*
+  (1) Noisy tenant — a configurable tenant floods a heavy
       endpoint (``/billing/calculate`` by default) with many
       concurrent workers. This is the shape of acme-corp's backfill.
 
-  (2) **Quiet tenant** — a different, unrelated tenant performs
+  (2) Quiet tenant — a different, unrelated tenant performs
       ordinary ingests at a relaxed pace. This is globex / initech
       during the incident.
 
@@ -21,12 +21,12 @@ how many failed for other reasons.
 
 How to interpret the output
 ---------------------------
-**With the server configured as-is** (both middlewares on):
+With the server configured as-is (both middlewares on):
     * the noisy tenant sees many ``concurrency_limit`` 429s — the
       fix working,
     * the quiet tenant sees ~100% 2xx — tenants are isolated.
 
-**To see the pre-fix behaviour**, edit ``billing_platform/settings.py``
+To see the pre-fix behaviour, edit ``billing_platform/settings.py``
 and comment out ``ConcurrencyMiddleware``. Re-run this script:
     * the noisy tenant admits far more concurrent calls,
     * the quiet tenant may start seeing slowdowns or failures under
