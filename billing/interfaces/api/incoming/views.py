@@ -8,7 +8,8 @@ logic, reach into Redis directly, or know about persistence details.
 
 from __future__ import annotations
 
-from typing import cast
+import logging
+from typing import Any, cast
 
 from rest_framework import status
 from rest_framework.exceptions import ValidationError
@@ -17,13 +18,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from billing.application.ingest_event import IngestEventCommand, ingest_event
-from billing.interfaces.api.incoming.serializers import (
-    UsageEventSerializer,
-    UsageEventValidated,
-)
+from billing.interfaces.api.incoming.serializers import UsageEventSerializer
 
 TENANT_HEADER = "X-Tenant-ID"
 
+logger = logging.getLogger(__name__)
 
 class IngestView(APIView):
     """POST /api/v1/events/ingest — accept one usage event for a tenant.
@@ -39,19 +38,24 @@ class IngestView(APIView):
 
     def post(self, request: Request, *args: object, **kwargs: object) -> Response:
         tenant_id = self._resolve_tenant(request)
+        
+        logger.info(f"IngestView: tenant_id is :{tenant_id}")
 
         serializer = UsageEventSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        logger.info(f"IngestView: serializer is valid, data is :{request.data}")
 
-        body = cast(UsageEventValidated, serializer.validated_data)
+        # Stubs type ``validated_data`` as ``empty | ...``; after ``is_valid`` it is a dict.
+        data = cast(dict[str, Any], serializer.validated_data)
+        logger.info(f"IngestView: validated_data is :{data}")
         command = IngestEventCommand(
             tenant_id=tenant_id,
-            event_name=body["event_name"],
-            customer_id=str(body["customer_id"]),
-            timestamp=body["timestamp"],
-            idempotency_key=str(body["idempotency_key"]),
-            value=body["value"],
-            properties=body["properties"],
+            event_name=data["event_name"],
+            customer_id=data["customer_id"],
+            timestamp=data["timestamp"],
+            idempotency_key=data["idempotency_key"],
+            value=float(data.get("value", 1.0)),
+            properties=data.get("properties") or {},
         )
         result = ingest_event(command)
 
