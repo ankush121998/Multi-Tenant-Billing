@@ -1,25 +1,68 @@
 """
-Persistence for ingested usage events.
+Event repository — the storage-side port for ingested usage events.
 
-Events land in a per-tenant Redis stream. Per-tenant streams give us:
-  * natural write isolation — one tenant's stream does not contend
-    with another's on append,
-  * a ready-made consumer surface for the rating engine (XREAD /
-    consumer groups),
-  * cheap per-tenant retention tuning (MAXLEN).
+Why this file exists
+--------------------
+Every ``POST /api/v1/events/ingest`` eventually needs to do two
+things that has nothing to do with HTTP: (1) make sure we don't
+record the same event twice when a client retries, and (2) durably
+hand the event off to whatever downstream machinery will rate and
+invoice it. This file is where those two concerns live. Keeping
+them here means the application service (``ingest_event.py``) stays
+a thin orchestrator and the HTTP view stays ignorant of Redis
+entirely — swap Redis for Kafka tomorrow and only this file
+changes.
 
-Idempotency is enforced with a short-TTL marker key per
-``(tenant_id, idempotency_key)``. The TTL is a pragmatic bound —
-tenants that retry an event more than a week after the original
-send are treated as new events rather than carrying the dedup
-state forever.
+What problems it solves
+-----------------------
+1. Idempotent writes under client retry. Billing clients retry
+   aggressively on timeouts. Without a dedup gate, a single logical
+   "user clicked buy" becomes two stream entries, the rating engine
+   counts it twice, and the customer is double-charged. The
+   ``_claim_idempotency`` helper uses a single atomic
+   ``SET NX EX`` to reserve ``(tenant_id, idempotency_key)`` before
+   the event is appended — retries hit a "seen that one" marker and
+   bail out without touching the stream.
 
-Note on atomicity: the idempotency marker and the stream append
-are two separate calls. If the process crashes between them, the
-marker is set but the event is missing from the stream. This is
-acceptable for the current scope (the incident we're solving is
-noisy-neighbor, not durability); a Lua script can make the pair
-atomic in a later commit if needed.
+2. Tenant isolation at the storage layer. Events are written to
+   a per-tenant stream key (``billing:events:<tenant_id>``). This
+   pairs with the admission-layer isolation (rate limiter +
+   concurrency semaphore) so one noisy tenant's writes can never
+   contend with another's on the same Redis key, can't inflate
+   another tenant's event count, and can have their retention tuned
+   independently via MAXLEN.
+
+3. A clean hand-off to the rating engine. Redis Streams give
+   the rating engine a natural consumer surface (XREAD / consumer
+   groups, at-least-once delivery, cursor management) without us
+   having to invent one. The billing calculator reads from the same
+   per-tenant key this file writes to — that shared key shape is
+   the contract between ingest and rating.
+
+4. Bounded memory for the dedup table. The idempotency marker
+   carries a 7-day TTL. Without the TTL the dedup set would grow
+   unboundedly at billing scale (hundreds of millions of keys);
+   with it, markers auto-expire long after any realistic client
+   retry window has closed, and memory is reclaimed for free.
+
+How the pieces fit
+------------------
+``record_event`` is the only public entrypoint. It runs the
+claim-then-append sequence (order is load-bearing — see that
+function's docstring). ``_claim_idempotency`` is the atomic gate.
+``_serialize_event`` flattens the command for Redis stream fields.
+The two small ``_*_key`` helpers centralise the key schema so a
+future rename touches one place.
+
+Known limitation (intentionally deferred)
+-----------------------------------------
+The claim and the XADD are two separate Redis round-trips. If the
+process dies between them, the marker is set but no stream entry
+exists — a later retry will be deduped and the event is lost. The
+textbook fix is to fold both calls into a single Lua script so
+Redis runs them atomically. We have not done that because the
+incident this codebase is solving is noisy-neighbor contention,
+not durability, and the crash window is small.
 """
 
 from __future__ import annotations
@@ -65,10 +108,10 @@ def record_event(command: IngestEventCommand) -> RecordedEvent:
 
     Reversing the order is a correctness bug, not a style choice.
     If we XADD first and dedup second, a retried request would land
-    a second copy in the stream *before* the dedup check runs — the
+    a second copy in the stream before the dedup check runs — the
     rating engine would then process the event twice and double-charge
     the customer. The claim-first pattern makes ``_claim_idempotency``
-    a *gate*: control only reaches the XADD when we are provably the
+    a gate: control only reaches the XADD when we are provably the
     first writer for this key.
 
     On duplicate we return ``stream_entry_id=""`` because we do not
@@ -84,8 +127,7 @@ def record_event(command: IngestEventCommand) -> RecordedEvent:
     fix is to fold both calls into a single Lua script so Redis runs
     them atomically. We have not done that because the incident this
     codebase is solving is noisy-neighbor contention, not durability,
-    and the crash-during-ingest window is small. A later commit can
-    upgrade this to Lua if durability matters.
+    and the crash-during-ingest window is small.
     """
     client = get_redis_client()
 
