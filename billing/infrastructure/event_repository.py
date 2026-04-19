@@ -23,6 +23,7 @@ atomic in a later commit if needed.
 """
 
 from __future__ import annotations
+import logging
 
 import json
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ import redis
 from billing.application.ingest_event import IngestEventCommand
 from billing.infrastructure.redis import get_redis_client
 
+logger = logging.getLogger(__name__)
 # redis-py types ``xadd`` ``fields`` as invariant ``dict`` over a broad
 # union; ``dict[str, str]`` is valid at runtime but not assignable without cast.
 type _RedisStreamFields = dict[
@@ -54,9 +56,9 @@ class RecordedEvent:
 def record_event(command: IngestEventCommand) -> RecordedEvent:
     """Persist one usage event idempotently.
 
-    The whole function is **two steps, and the order is load-bearing**:
+    The whole function is two steps, and the order is load-bearing:
 
-        1. Try to *claim* the ``(tenant_id, idempotency_key)`` pair.
+        1. Try to claim the ``(tenant_id, idempotency_key)`` pair.
            If someone already claimed it, this is a retry — bail out.
         2. Only on a fresh claim, append the event to the tenant's
            Redis Stream.
@@ -114,7 +116,7 @@ def _claim_idempotency(
     """Atomically reserve ``(tenant, idempotency_key)``.
 
     Returns ``True`` on the first call for this pair, ``False`` on any
-    later call (within the TTL window). The *entire* correctness of
+    later call (within the TTL window). The entire correctness of
     "don't double-charge a customer on client retry" rests on this
     two-line function, so it's worth being explicit about why this
     works.
@@ -124,9 +126,9 @@ def _claim_idempotency(
     The command sent to Redis is ``SET marker "1" NX EX <ttl>`` — a
     single Redis command with two flags:
 
-      * ``NX`` = **N**ot e**X**ists: only write the key if it is not
+      * ``NX`` = Not Exists: only write the key if it is not
         already present.
-      * ``EX`` = **EX**piry: attach a TTL to the key, in seconds.
+      * ``EX`` = Expiry: attach a TTL to the key, in seconds.
 
     Redis is single-threaded on command execution. That means the
     whole ``SET NX EX`` runs atomically — no other command can sneak
@@ -165,6 +167,7 @@ def _claim_idempotency(
     glance — no more "why does this sometimes look like None?".
     """
     marker = _idempotency_key(tenant_id, idempotency_key)
+    logger.info(f"Claiming idempotency for {marker}")
     was_first = client.set(marker, "1", nx=True, ex=IDEMPOTENCY_TTL_SECONDS)
     return bool(was_first)
 
