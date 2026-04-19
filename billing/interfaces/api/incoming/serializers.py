@@ -86,3 +86,46 @@ class UsageEventSerializer(serializers.Serializer):
         default=dict,
         help_text="Arbitrary structured attributes used by the rating engine.",
     )
+
+
+class BillingCalculateSerializer(serializers.Serializer):
+    """Validates the JSON body of POST /api/v1/billing/calculate.
+
+    The application layer runs a multi-round-trip Redis workflow
+    (stream scan, pricing lookup, draft write) whose *shape* is what
+    makes this endpoint the concurrency-cap's main protectee. The
+    serializer keeps the inputs strict so a malformed call can't slip
+    into the hot path and waste a slot.
+    """
+
+    customer_id = serializers.CharField(
+        help_text="Tenant's own customer identifier to bill.",
+    )
+    period_start = serializers.DateTimeField(
+        help_text="Inclusive start of the billing window (ISO-8601).",
+    )
+    period_end = serializers.DateTimeField(
+        help_text="Exclusive end of the billing window (ISO-8601).",
+    )
+
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        if attrs["period_end"] <= attrs["period_start"]:
+            raise serializers.ValidationError(
+                {"period_end": "period_end must be after period_start."}
+            )
+        return attrs
+
+
+class InvoiceGenerateSerializer(serializers.Serializer):
+    """Validates the JSON body of POST /api/v1/invoices/generate.
+
+    ``invoice_id`` is the opaque id returned by a prior
+    ``/billing/calculate`` call. Kept as a plain ``CharField`` because
+    the generator owns the id format (``inv_<hex>``); the serializer
+    shouldn't couple to that representation.
+    """
+
+    invoice_id = serializers.CharField(
+        max_length=64,
+        help_text="Draft invoice id returned by /billing/calculate.",
+    )
