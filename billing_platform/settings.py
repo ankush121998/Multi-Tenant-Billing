@@ -22,6 +22,9 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # Rate-limit admission runs first so a rejected request spends
+    # no cycles on body parsing, auth, or view dispatch.
+    "billing.interfaces.api.incoming.middleware.RateLimitMiddleware",
     "django.middleware.common.CommonMiddleware",
 ]
 
