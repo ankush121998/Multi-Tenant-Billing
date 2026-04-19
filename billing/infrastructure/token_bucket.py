@@ -81,8 +81,8 @@ def consume(
     *,
     key: str,
     capacity: int,
-    refill_rate: float,
-    cost: float,
+    refill_rate: int,
+    cost: int,
 ) -> BucketDecision:
     """Try to consume ``cost`` tokens from the bucket at ``key``.
 
