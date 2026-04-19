@@ -26,11 +26,23 @@ from typing import Callable
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
 from billing.application.rate_limiter import check_and_consume
+from billing.domain.tenant_plan import plan_for
+from billing.infrastructure.concurrency_semaphore import acquire, release
 
 logger = logging.getLogger(__name__)
 
 _API_PREFIX = "/api/v1/"
 TENANT_HEADER = "X-Tenant-ID"
+
+# Only the slow, resource-heavy endpoints participate in the concurrency
+# cap. Ingests are cheap (one XADD, one SET NX) and don't benefit from
+# an in-flight cap — the token bucket alone is the right tool there.
+# The heavy endpoints are the ones that held Redis connections long
+# enough to exhaust the pool in the incident we are solving.
+_HEAVY_ENDPOINTS: frozenset[str] = frozenset({
+    "/api/v1/billing/calculate",
+    "/api/v1/invoices/generate",
+})
 
 
 class RateLimitMiddleware:
@@ -85,3 +97,86 @@ class RateLimitMiddleware:
         )
         response["Retry-After"] = str(retry_after)
         return response
+
+
+class ConcurrencyMiddleware:
+    """Per-tenant in-flight cap for expensive endpoints.
+
+    Complements the rate limiter: the bucket caps *new* requests per
+    second; this caps *concurrent* requests. Together they close the
+    gap that caused the acme-corp incident — a workload can stay under
+    the rate limit while still stacking up enough long-running jobs to
+    exhaust the Redis connection pool.
+
+    Only applied to ``_HEAVY_ENDPOINTS`` because that's where the
+    incident lived. Ingests run in tens of milliseconds; a concurrency
+    check there would be pure overhead.
+
+    Acquire-before, release-after in ``try/finally`` is the whole
+    contract: the slot is released even if the view raises. Without
+    the ``finally``, a view error would leak slots until the TTL-based
+    cleanup reclaims them — correct eventually, but painful under
+    repeated failure.
+    """
+
+    def __init__(self, get_response: Callable[[HttpRequest], HttpResponse]):
+        self.get_response = get_response
+
+    def __call__(self, request: HttpRequest) -> HttpResponse:
+        if request.path not in _HEAVY_ENDPOINTS:
+            return self.get_response(request)
+
+        tenant_id = (request.headers.get(TENANT_HEADER) or "").strip()
+        if not tenant_id:
+            # Defer to the view for the 400; nothing to cap against.
+            return self.get_response(request)
+
+        limits = plan_for(tenant_id)
+        key = _concurrency_key(tenant_id)
+
+        try:
+            handle = acquire(key=key, capacity=limits.max_concurrency)
+        except Exception:
+            # Fail open for the same reason the rate limiter does: a
+            # broken limiter must never become a platform outage.
+            logger.exception(
+                "concurrency_error; failing open tenant=%s path=%s",
+                tenant_id, request.path,
+            )
+            return self.get_response(request)
+
+        if not handle.admitted:
+            logger.warning(
+                "concurrency_limited tenant=%s path=%s in_flight=%d cap=%d",
+                tenant_id, request.path, handle.in_flight, limits.max_concurrency,
+            )
+            response = JsonResponse(
+                {
+                    "error": "concurrency_limit",
+                    "tenant": tenant_id,
+                    "in_flight": handle.in_flight,
+                    "max_concurrency": limits.max_concurrency,
+                },
+                status=429,
+            )
+            # The slot will free when an existing holder completes;
+            # 1s is a sensible hint for a polite retry.
+            response["Retry-After"] = "1"
+            return response
+
+        try:
+            return self.get_response(request)
+        finally:
+            try:
+                release(key=key, slot_id=handle.slot_id)
+            except Exception:
+                # A failed release is self-healing via the slot TTL;
+                # log and move on rather than mask the view's response.
+                logger.exception(
+                    "concurrency_release_error tenant=%s path=%s",
+                    tenant_id, request.path,
+                )
+
+
+def _concurrency_key(tenant_id: str) -> str:
+    return f"billing:concurrency:{tenant_id}"

@@ -28,12 +28,12 @@ from billing.infrastructure.token_bucket import consume
 # a multi-op billing calculation is an order of magnitude more.
 #
 # Entries for endpoints
-_ENDPOINT_COSTS: dict[str, float] = {
-    "/api/v1/events/ingest":       1.0,
-    "/api/v1/billing/calculate":  10.0,
-    "/api/v1/invoices/generate": 15.0,
+_ENDPOINT_COSTS: dict[str, int] = {
+    "/api/v1/events/ingest":       1,
+    "/api/v1/billing/calculate":  10,
+    "/api/v1/invoices/generate": 15,
 }
-_DEFAULT_COST = 1.0
+_DEFAULT_COST = 1
 
 
 @dataclass(frozen=True)
@@ -68,7 +68,7 @@ def check_and_consume(tenant_id: str, endpoint: str) -> RateLimitDecision:
     )
 
 
-def _cost_of(endpoint: str) -> float:
+def _cost_of(endpoint: str) -> int:
     return _ENDPOINT_COSTS.get(endpoint, _DEFAULT_COST)
 
 
